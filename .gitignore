@@ -1,1 +1,9 @@
 .venv/
+data/neu_det_yolo/
+data/NEU-DET/
+runs/
+models/best.pt
+models/uploaded/
+yolov8n.pt
+__pycache__/
+*.pyc

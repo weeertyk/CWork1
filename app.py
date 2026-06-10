@@ -15,13 +15,10 @@ if str(ROOT) not in sys.path:
 from src.constants import (  # noqa: E402
     DEFECT_CLASSES,
     DEFECT_CLASSES_RU,
-    DEFAULT_DATA_YAML,
     DEFAULT_MODEL,
     YOLO_BASE_MODELS,
 )
-from src.dataset_utils import prepare_neu_det_pipeline, write_data_yaml  # noqa: E402
 from src.detector import DefectDetector  # noqa: E402
-from src.trainer import DefectTrainer, TrainingConfig  # noqa: E402
 from src.visualization import (  # noqa: E402
     bgr_to_rgb,
     detections_to_dataframe,
@@ -52,7 +49,6 @@ def init_session_state() -> None:
     defaults = {
         "analysis_results": [],
         "last_model_path": None,
-        "training_done": False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -90,8 +86,8 @@ def sidebar_settings() -> tuple[str | None, float, float, str | None]:
 
     if selected_model in YOLO_BASE_MODELS and not DEFAULT_MODEL.exists() and not latest:
         st.sidebar.warning(
-            "Используется базовая COCO-модель. Для дефектов металла "
-            "сначала обучите модель на вкладке «Обучение»."
+            "Используется базовая COCO-модель. Загрузите обученные веса (.pt) "
+            "или поместите best.pt в папку models/."
         )
 
     st.sidebar.divider()
@@ -107,51 +103,22 @@ def load_detector(model_path: str, conf: float, iou: float, device: str | None) 
     return DefectDetector(model_path=model_path, conf=conf, iou=iou, device=device)
 
 
-def tab_analysis(model_path: str, conf: float, iou: float, device: str | None) -> None:
-    st.subheader("Анализ изображений")
+def run_analysis(
+    sources: list[tuple[Image.Image, str]],
+    model_path: str,
+    conf: float,
+    iou: float,
+    device: str | None,
+) -> None:
+    detector = load_detector(model_path, conf, iou, device)
+    results = detector.predict_batch(
+        [img for img, _ in sources],
+        [name for _, name in sources],
+    )
+    st.session_state.analysis_results = results
 
-    col_upload, col_info = st.columns([2, 1])
-    with col_upload:
-        uploaded = st.file_uploader(
-            "Загрузите фото металлической детали",
-            type=["jpg", "jpeg", "png", "bmp", "webp"],
-            accept_multiple_files=True,
-        )
-    with col_info:
-        st.info(
-            "Поддерживается пакетная загрузка. "
-            "Модель выделяет дефекты bounding box'ами и формирует отчёт."
-        )
 
-    camera = st.camera_input("Или сделайте снимок с камеры")
-    sources: list[tuple[Image.Image, str]] = []
-
-    if uploaded:
-        for file in uploaded:
-            sources.append((Image.open(file), file.name))
-    if camera:
-        sources.append((Image.open(camera), "camera.jpg"))
-
-    if not sources:
-        st.markdown(
-            """
-            ### Как начать
-            1. Скачайте [NEU Surface Defect Database](https://www.kaggle.com/datasets/kaustubhdikshit/neu-surface-defect-database) с Kaggle
-            2. Подготовьте датасет на вкладке **Подготовка данных**
-            3. Обучите модель на вкладке **Обучение**
-            4. Загрузите изображение для анализа
-            """
-        )
-        return
-
-    if st.button("🔍 Запустить анализ", type="primary", use_container_width=False):
-        detector = load_detector(model_path, conf, iou, device)
-        results = detector.predict_batch(
-            [img for img, _ in sources],
-            [name for _, name in sources],
-        )
-        st.session_state.analysis_results = results
-
+def render_results() -> None:
     results = st.session_state.analysis_results
     if not results:
         return
@@ -200,141 +167,41 @@ def tab_analysis(model_path: str, conf: float, iou: float, device: str | None) -
     )
 
 
-def tab_training() -> None:
-    st.subheader("Обучение YOLOv8")
+def tab_analysis(model_path: str, conf: float, iou: float, device: str | None) -> None:
+    st.subheader("Анализ изображений")
 
-    data_yaml = st.text_input("Путь к data.yaml", value=str(DEFAULT_DATA_YAML))
-    base_model = st.selectbox("Базовая модель", YOLO_BASE_MODELS, index=0)
-    col1, col2, col3 = st.columns(3)
-    epochs = col1.number_input("Эпохи", 1, 500, 50)
-    imgsz = col2.selectbox("Размер изображения", [320, 416, 640, 1280], index=2)
-    batch = col3.number_input("Batch size", 1, 64, 16)
-    device = st.selectbox("Устройство (обучение)", ["auto", "cpu", "0"], index=0)
-    device_arg = None if device == "auto" else device
-    run_name = st.text_input("Имя эксперимента", value="metal_defect_train")
+    tab_upload, tab_camera = st.tabs(["📁 Загрузка файлов", "📸 Камера"])
 
-    st.markdown(
-        """
-        Обучение основано на подходе из
-        [Kaggle notebook (YOLOv8 manufacturing defects)](https://www.kaggle.com/code/hareshkanaaramaraj/manufacturing-defect-detection-using-yolov8/notebook).
-        Для металлических деталей используется датасет **NEU-DET** (6 классов дефектов).
-        """
-    )
+    with tab_upload:
+        st.markdown("Загрузите одно или несколько изображений металлической детали.")
+        uploaded = st.file_uploader(
+            "Выберите файлы",
+            type=["jpg", "jpeg", "png", "bmp", "webp"],
+            accept_multiple_files=True,
+            key="upload_files",
+        )
+        st.info("Поддерживается пакетная загрузка. Модель выделяет дефекты и формирует отчёт.")
 
-    if st.button("🚀 Начать обучение", type="primary"):
-        yaml_path = Path(data_yaml)
-        if not yaml_path.exists():
-            st.error(f"Файл не найден: {yaml_path}. Сначала подготовьте датасет.")
-            return
+        if st.button("🔍 Запустить анализ", type="primary", key="analyze_upload"):
+            if not uploaded:
+                st.warning("Загрузите хотя бы одно изображение.")
+            else:
+                sources = [(Image.open(file), file.name) for file in uploaded]
+                run_analysis(sources, model_path, conf, iou, device)
 
-        progress = st.progress(0, text="Инициализация...")
-        status = st.empty()
+    with tab_camera:
+        st.markdown("Сделайте снимок с камеры устройства.")
+        camera = st.camera_input("Камера", key="camera_input")
+        st.info("Снимок будет проанализирован на наличие дефектов поверхности.")
 
-        try:
-            trainer = DefectTrainer()
-            status.info("Обучение запущено. Это может занять от нескольких минут до часов.")
-            progress.progress(10, text="Обучение YOLOv8...")
+        if st.button("🔍 Запустить анализ", type="primary", key="analyze_camera"):
+            if not camera:
+                st.warning("Сделайте снимок с камеры.")
+            else:
+                sources = [(Image.open(camera), "camera.jpg")]
+                run_analysis(sources, model_path, conf, iou, device)
 
-            result = trainer.train(
-                TrainingConfig(
-                    data_yaml=yaml_path,
-                    base_model=base_model,
-                    epochs=int(epochs),
-                    imgsz=int(imgsz),
-                    batch=int(batch),
-                    device=device_arg,
-                    name=run_name,
-                )
-            )
-            progress.progress(100, text="Готово!")
-            st.session_state.training_done = True
-            st.success(f"Обучение завершено. Веса: `{result.best_weights}`")
-            st.info(f"Модель скопирована в `{DEFAULT_MODEL}` для использования в анализе.")
-
-            val_metrics = trainer.validate(result.best_weights, yaml_path, device_arg)
-            mc1, mc2, mc3, mc4 = st.columns(4)
-            mc1.metric("mAP@0.5", f"{val_metrics['mAP50']:.3f}")
-            mc2.metric("mAP@0.5:0.95", f"{val_metrics['mAP50-95']:.3f}")
-            mc3.metric("Precision", f"{val_metrics['precision']:.3f}")
-            mc4.metric("Recall", f"{val_metrics['recall']:.3f}")
-
-            load_detector.clear()
-        except Exception as exc:
-            progress.empty()
-            st.error(f"Ошибка обучения: {exc}")
-
-
-def tab_dataset() -> None:
-    st.subheader("Подготовка данных NEU-DET")
-
-    st.markdown(
-        """
-        1. Скачайте датасет с Kaggle: [NEU Surface Defect Database](https://www.kaggle.com/datasets/kaustubhdikshit/neu-surface-defect-database)
-        2. Распакуйте в `data/NEU-DET/` — поддерживаются обе структуры:
-
-        **Вариант A (ваш):**
-        ```
-        NEU-DET/
-        ├── train/
-        │   ├── images/
-        │   │   ├── crazing/
-        │   │   ├── inclusion/
-        │   │   ├── patches/
-        │   │   ├── pitted_surface/
-        │   │   ├── rolled-in_scale/
-        │   │   └── scratches/
-        │   └── annotations/
-        └── validation/
-            ├── images/...
-            └── annotations/
-        ```
-
-        **Вариант B (классический):**
-        ```
-        NEU-DET/
-        ├── IMAGES/
-        └── ANNOTATIONS/
-        ```
-        3. Укажите путь к папке `NEU-DET` ниже
-        """
-    )
-
-    raw_dir = st.text_input(
-        "Путь к исходному NEU-DET",
-        value=str(ROOT / "data" / "NEU-DET"),
-        placeholder=r"F:\chrevoygodie\CWork1\data\NEU-DET",
-    )
-    output_dir = st.text_input(
-        "Папка для YOLO-датасета",
-        value=str(ROOT / "data" / "neu_det_yolo"),
-    )
-    c1, c2 = st.columns(2)
-    train_ratio = c1.slider("Train", 0.5, 0.9, 0.8, 0.05)
-    val_ratio = c2.slider("Val", 0.05, 0.3, 0.1, 0.05)
-
-    if st.button("📦 Подготовить датасет", type="primary"):
-        raw_path = Path(raw_dir)
-        if not raw_path.exists():
-            st.error("Указанная папка не существует.")
-            return
-
-        with st.spinner("Конвертация XML → YOLO..."):
-            yaml_path = prepare_neu_det_pipeline(
-                raw_dir=raw_path,
-                output_root=Path(output_dir),
-                train_ratio=train_ratio,
-                val_ratio=val_ratio,
-            )
-            config_path = ROOT / "config" / "neu_det.yaml"
-            write_data_yaml(
-                dataset_root=Path(output_dir) / "split",
-                output_path=config_path,
-                include_test=(Path(output_dir) / "split" / "test" / "images").exists(),
-            )
-
-        st.success("Датасет подготовлен!")
-        st.code(str(yaml_path.resolve()))
-        st.info(f"Конфиг обновлён: `{config_path}`")
+    render_results()
 
 
 def main() -> None:
@@ -344,15 +211,7 @@ def main() -> None:
     st.caption("Computer Vision · YOLOv8 · NEU-DET · Streamlit")
 
     model_path, conf, iou, device = sidebar_settings()
-
-    tab1, tab2, tab3 = st.tabs(["📷 Анализ", "🎓 Обучение", "📁 Подготовка данных"])
-
-    with tab1:
-        tab_analysis(model_path, conf, iou, device)
-    with tab2:
-        tab_training()
-    with tab3:
-        tab_dataset()
+    tab_analysis(model_path, conf, iou, device)
 
 
 if __name__ == "__main__":

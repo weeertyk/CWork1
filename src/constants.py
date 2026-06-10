@@ -1,12 +1,8 @@
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_DIR = PROJECT_ROOT / "config"
 MODELS_DIR = PROJECT_ROOT / "models"
-DATA_DIR = PROJECT_ROOT / "data"
-RUNS_DIR = PROJECT_ROOT / "runs"
 
-DEFAULT_DATA_YAML = CONFIG_DIR / "neu_det.yaml"
 DEFAULT_MODEL = MODELS_DIR / "best.pt"
 
 # NEU Steel Surface Defect Database — 6 типов дефектов
